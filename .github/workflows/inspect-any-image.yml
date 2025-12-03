@@ -1,0 +1,293 @@
+name: Universal Image Inspector
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: '镜像名（支持 docker.io/xxx, ghcr.io/xxx, 或简写 nginx）'
+        required: true
+        default: 'lmentory/wee'
+        type: string
+      extract_path:
+        description: '要提取的路径（默认 /app，可改为 / 或其他）'
+        required: false
+        default: '/app'
+        type: string
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 🔄 处理镜像名
+        id: process_image
+        run: |
+          IMAGE="${{ github.event.inputs.image }}"
+          
+          # 自动处理镜像名
+          if [[ "$IMAGE" == ghcr.io/* ]]; then
+            # GitHub Container Registry
+            echo "检测到 GitHub 镜像"
+            FULL_IMAGE="$IMAGE"
+          elif [[ "$IMAGE" == */* ]] && [[ "$IMAGE" != *.* ]]; then
+            # Docker Hub 格式 (user/repo)
+            echo "检测到 Docker Hub 镜像"
+            # 如果没有标签，添加 :latest
+            if [[ "$IMAGE" != *:* ]]; then
+              IMAGE="$IMAGE:latest"
+            fi
+            FULL_IMAGE="docker.io/$IMAGE"
+          elif [[ "$IMAGE" == *.* ]] && [[ "$IMAGE" == */* ]]; then
+            # 完整域名格式（如 quay.io/xxx）
+            echo "检测到完整域名格式"
+            FULL_IMAGE="$IMAGE"
+          else
+            # 简单镜像名（如 nginx, alpine）
+            echo "检测到官方镜像"
+            if [[ "$IMAGE" != *:* ]]; then
+              IMAGE="$IMAGE:latest"
+            fi
+            FULL_IMAGE="docker.io/library/$IMAGE"
+          fi
+          
+          # 确保有标签
+          if [[ "$FULL_IMAGE" != *:* ]]; then
+            FULL_IMAGE="$FULL_IMAGE:latest"
+          fi
+          
+          echo "原始输入: ${{ github.event.inputs.image }}"
+          echo "处理后: $FULL_IMAGE"
+          
+          # 输出变量
+          echo "full_image=$FULL_IMAGE" >> $GITHUB_OUTPUT
+          echo "display_image=$IMAGE" >> $GITHUB_OUTPUT
+          
+          # 添加到 Summary
+          echo "## 🎯 镜像信息" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**输入:** \`${{ github.event.inputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**完整路径:** \`$FULL_IMAGE\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+      
+      - name: 📥 拉取镜像
+        run: |
+          echo "正在拉取: ${{ steps.process_image.outputs.full_image }}"
+          docker pull ${{ steps.process_image.outputs.full_image }}
+          
+          # 创建简短别名
+          docker tag ${{ steps.process_image.outputs.full_image }} inspect:latest
+      
+      - name: 📊 镜像基本信息
+        run: |
+          echo "## 📊 镜像基本信息" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 镜像大小
+          SIZE=$(docker images inspect:latest --format='{{.Size}}' | numfmt --to=iec-i --suffix=B)
+          echo "**大小:** $SIZE" >> $GITHUB_STEP_SUMMARY
+          
+          # 创建时间
+          CREATED=$(docker inspect inspect:latest --format='{{.Created}}')
+          echo "**创建时间:** $CREATED" >> $GITHUB_STEP_SUMMARY
+          
+          # 架构
+          ARCH=$(docker inspect inspect:latest --format='{{.Architecture}}')
+          OS=$(docker inspect inspect:latest --format='{{.Os}}')
+          echo "**平台:** $OS/$ARCH" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+      
+      - name: 🚀 启动配置
+        run: |
+          echo "## 🚀 启动配置" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 获取配置
+          ENTRYPOINT=$(docker inspect inspect:latest --format='{{json .Config.Entrypoint}}')
+          CMD=$(docker inspect inspect:latest --format='{{json .Config.Cmd}}')
+          WORKDIR=$(docker inspect inspect:latest --format='{{.Config.WorkingDir}}')
+          USER=$(docker inspect inspect:latest --format='{{.Config.User}}')
+          EXPOSE=$(docker inspect inspect:latest --format='{{json .Config.ExposedPorts}}')
+          
+          echo "| 配置项 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Entrypoint** | \`$ENTRYPOINT\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Cmd** | \`$CMD\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **WorkingDir** | \`${WORKDIR:-/}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **User** | \`${USER:-root}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **ExposedPorts** | \`$EXPOSE\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 保存完整配置
+          docker inspect inspect:latest > image-config.json
+      
+      - name: 🌍 环境变量
+        run: |
+          echo "## 🌍 环境变量" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          docker run --rm inspect:latest env 2>/dev/null | sort >> $GITHUB_STEP_SUMMARY || echo "无法获取" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+      
+      - name: 📂 文件系统结构
+        run: |
+          echo "## 📂 文件系统结构" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          EXTRACT_PATH="${{ github.event.inputs.extract_path }}"
+          
+          # 根目录
+          echo "### 根目录 (/)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          docker run --rm inspect:latest ls -la / 2>/dev/null | head -20 >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 工作目录
+          WORKDIR=$(docker inspect inspect:latest --format='{{.Config.WorkingDir}}')
+          if [ -n "$WORKDIR" ] && [ "$WORKDIR" != "/" ]; then
+            echo "### 工作目录 ($WORKDIR)" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            docker run --rm inspect:latest ls -la $WORKDIR 2>/dev/null | head -20 >> $GITHUB_STEP_SUMMARY || echo "目录不存在或无权限" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # 用户指定目录
+          if [ -n "$EXTRACT_PATH" ] && [ "$EXTRACT_PATH" != "/" ] && [ "$EXTRACT_PATH" != "$WORKDIR" ]; then
+            echo "### 指定目录 ($EXTRACT_PATH)" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            docker run --rm inspect:latest ls -la $EXTRACT_PATH 2>/dev/null | head -20 >> $GITHUB_STEP_SUMMARY || echo "目录不存在" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: 📜 查找重要文件
+        run: |
+          echo "## 📜 重要文件" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 查找脚本文件
+          echo "### Shell 脚本" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          docker run --rm inspect:latest find / -name "*.sh" -type f 2>/dev/null | grep -v '/proc/' | grep -v '/sys/' | head -20 >> $GITHUB_STEP_SUMMARY || echo "未找到" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 查找配置文件
+          echo "### 配置文件" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          docker run --rm inspect:latest find / -name "*.conf" -o -name "*.yaml" -o -name "*.yml" -o -name "*.json" -o -name "*.toml" -type f 2>/dev/null | grep -v '/proc/' | grep -v '/sys/' | head -20 >> $GITHUB_STEP_SUMMARY || echo "未找到" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+      
+      - name: 📝 查看启动脚本
+        run: |
+          echo "## 📝 启动脚本内容" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 常见启动脚本位置
+          SCRIPTS=(
+            "/start.sh"
+            "/entrypoint.sh"
+            "/app/start.sh"
+            "/app/entrypoint.sh"
+            "/docker-entrypoint.sh"
+            "/usr/local/bin/docker-entrypoint.sh"
+            "/run.sh"
+          )
+          
+          for script in "${SCRIPTS[@]}"; do
+            echo "### 检查 $script" >> $GITHUB_STEP_SUMMARY
+            if docker run --rm inspect:latest test -f $script; then
+              echo "✅ 文件存在" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+              docker run --rm inspect:latest cat $script 2>/dev/null | head -100 >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ 文件不存在" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+          done
+      
+      - name: 📦 提取文件
+        run: |
+          echo "正在提取文件..."
+          docker create --name temp inspect:latest
+          
+          EXTRACT_PATH="${{ github.event.inputs.extract_path }}"
+          WORKDIR=$(docker inspect inspect:latest --format='{{.Config.WorkingDir}}')
+          
+          # 创建目录
+          mkdir -p extracted-files
+          cd extracted-files
+          
+          # 提取指定路径
+          if [ -n "$EXTRACT_PATH" ]; then
+            echo "提取 $EXTRACT_PATH ..."
+            docker cp temp:$EXTRACT_PATH ./custom-path 2>/dev/null || echo "$EXTRACT_PATH 不存在"
+          fi
+          
+          # 提取工作目录
+          if [ -n "$WORKDIR" ] && [ "$WORKDIR" != "/" ] && [ "$WORKDIR" != "$EXTRACT_PATH" ]; then
+            echo "提取工作目录 $WORKDIR ..."
+            docker cp temp:$WORKDIR ./workdir 2>/dev/null || true
+          fi
+          
+          # 提取常见脚本
+          mkdir -p scripts
+          for script in /start.sh /entrypoint.sh /docker-entrypoint.sh /run.sh; do
+            docker cp temp:$script ./scripts/ 2>/dev/null || true
+          done
+          
+          # 提取配置文件
+          mkdir -p configs
+          docker cp temp:/etc ./configs/etc 2>/dev/null || true
+          
+          docker rm temp
+          
+          # 创建说明文件
+          cat > README.txt << EOF
+          镜像: ${{ steps.process_image.outputs.full_image }}
+          提取时间: $(date)
+          提取路径: $EXTRACT_PATH
+          工作目录: $WORKDIR
+          
+          目录说明:
+          - custom-path/: 用户指定的 $EXTRACT_PATH 目录
+          - workdir/: 镜像的工作目录
+          - scripts/: 启动脚本
+          - configs/: 配置文件
+          EOF
+          
+          cd ..
+      
+      - name: 📤 上传文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-files
+          path: |
+            extracted-files/
+            image-config.json
+      
+      - name: ✅ 完成总结
+        run: |
+          echo "## ✅ 侦查完成！" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 下载" >> $GITHUB_STEP_SUMMARY
+          echo "在 **Artifacts** 中下载 \`docker-image-files.zip\` 获取：" >> $GITHUB_STEP_SUMMARY
+          echo "- 镜像配置文件 (image-config.json)" >> $GITHUB_STEP_SUMMARY
+          echo "- 提取的文件 (extracted-files/)" >> $GITHUB_STEP_SUMMARY
+          echo "- 启动脚本 (scripts/)" >> $GITHUB_STEP_SUMMARY
+          echo "- 配置文件 (configs/)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # 常用镜像示例
+          echo "### 🔍 其他镜像示例" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "你可以尝试侦查这些镜像：" >> $GITHUB_STEP_SUMMARY
+          echo "- \`nginx\` - 官方 Nginx" >> $GITHUB_STEP_SUMMARY
+          echo "- \`mysql:8.0\` - MySQL 数据库" >> $GITHUB_STEP_SUMMARY
+          echo "- \`node:18-alpine\` - Node.js" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/用户名/仓库名\` - GitHub 镜像" >> $GITHUB_STEP_SUMMARY
+          echo "- \`lmentory/wee\` - 你的 WebDAV" >> $GITHUB_STEP_SUMMARY
